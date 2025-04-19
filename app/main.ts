@@ -22,14 +22,10 @@ const args = process.argv;
 const bencodedValue = args[3];
 
 if (args[2] === "decode") {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    console.error("Logs from your program will appear here!");
-
-    // Uncomment this block to pass the first stage
-    // try {
-    //     const decoded = decodeBencode(bencodedValue);
-    //     console.log(JSON.stringify(decoded));
-    // } catch (error) {
-    //     console.error(error.message);
-    // }
+    try{
+        const decode = decodeBencode(bencodedValue)
+        console.log(JSON.stringify(decode))
+    }catch{
+        console.error("error decode");
+    }
 }
