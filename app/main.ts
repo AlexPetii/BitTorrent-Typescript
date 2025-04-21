@@ -5,7 +5,8 @@ function decodeBencode(bencodedValue: string): string | number {
   //number
   if (bencodedValue[0] === "i") {
     return parseInt(bencodedValue.substring(1, bencodedValue.length - 1));
-  } else if (!isNaN(parseInt(bencodedValue[0]))) {
+  }
+  if (!isNaN(parseInt(bencodedValue[0]))) {
     const firstColonIndex = bencodedValue.indexOf(":");
     if (firstColonIndex === -1) {
       throw new Error("Invalid encoded value");
