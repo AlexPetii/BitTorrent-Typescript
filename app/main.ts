@@ -27,3 +27,4 @@ if (args[2] === "decode") {
     console.error("error decode");
   }
 }
+//test message
