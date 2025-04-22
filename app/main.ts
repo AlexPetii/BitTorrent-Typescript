@@ -1,5 +1,5 @@
 function decodeBencode(bencodedValue: string): any {
-  function parse(index: number): [any, number] {
+  function parse(index: number): [any, number] | any {
     const char = bencodedValue[index];
 
     switch (char) {
@@ -18,6 +18,20 @@ function decodeBencode(bencodedValue: string): any {
           index = nextIndex;
         }
         return [list, index + 1];
+      }
+      case "d": {
+      const dict: Record<string, any> = {};
+      index++;
+      while(bencodedValue[index] !== "e"){
+        const [key, keyIndex] = parse(index);
+        if(typeof key !== "string") {
+          throw new Error (`Invalid key of index ${index}, must be string`)
+        }
+        const [value, nextIndex] = parse(keyIndex);
+        dict[key] = value;
+        index = nextIndex;
+      }
+      return [dict, index + 1];
       }
       default: {
         if (/\d/.test(char)) {
