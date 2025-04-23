@@ -10,7 +10,6 @@ function decodeBencode(bencodedValue: string): any {
         const number = parseInt(bencodedValue.substring(index + 1, end));
         return [number, end + 1];
       }
-
       case "l": {
         const list: any[] = [];
         index++;
@@ -49,7 +48,6 @@ function decodeBencode(bencodedValue: string): any {
       }
     }
   }
-
   const [result] = parse(0);
   return result;
 }
@@ -76,42 +74,47 @@ if (command === "decode") {
     const infoKey = "4:info";
     const infoStart = fileString.indexOf(infoKey) + infoKey.length;
     function findInfoEnd(index: number): number {
-      let stack = []; // будем отслеживать открытые структуры: 'd' или 'l'
-    
+      let stack = [];
       while (index < fileString.length) {
         const char = fileString[index];
-    
-        if (char === 'd' || char === 'l') {
+        if (char === "d" || char === "l") {
           stack.push(char);
           index++;
-        } else if (char === 'e') {
+        } else if (char === "e") {
           stack.pop();
           index++;
-          if (stack.length === 0) break; // всё закрыто
-        } else if (char === 'i') {
-          const end = fileString.indexOf('e', index);
+          if (stack.length === 0) break;
+        } else if (char === "i") {
+          const end = fileString.indexOf("e", index);
           index = end + 1;
         } else if (/\d/.test(char)) {
-          const colon = fileString.indexOf(':', index);
+          const colon = fileString.indexOf(":", index);
           const length = parseInt(fileString.substring(index, colon));
           index = colon + 1 + length;
         } else {
-          throw new Error(`Unexpected character '${char}' at position ${index}`);
+          throw new Error(
+            `Unexpected character '${char}' at position ${index}`
+          );
         }
       }
-    
       return index;
     }
     const infoEnd = findInfoEnd(infoStart);
-    const infoByteStart = Buffer.byteLength(fileString.substring(0, infoStart), "binary");
-    const infoByteEnd = Buffer.byteLength(fileString.substring(0, infoEnd), "binary");
+    const infoByteStart = Buffer.byteLength(
+      fileString.substring(0, infoStart),
+      "binary"
+    );
+    const infoByteEnd = Buffer.byteLength(
+      fileString.substring(0, infoEnd),
+      "binary"
+    );
 
     const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
     const infoHash = createHash("sha1").update(infoBuffer).digest("hex");
 
     console.log(`Tracker URL: ${anounce}`);
     console.log(`Length: ${length}`);
-    console.log(`Info Hash: ${infoHash}`)
+    console.log(`Info Hash: ${infoHash}`);
   } catch (e) {
     console.error("error info", e);
   }
