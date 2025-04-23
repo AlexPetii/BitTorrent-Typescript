@@ -75,29 +75,33 @@ if (command === "decode") {
 
     const infoKey = "4:info";
     const infoStart = fileString.indexOf(infoKey) + infoKey.length;
-    const findInfoEnd = (index: number): number => {
-      let depth = 0;
+    function findInfoEnd(index: number): number {
+      let stack = []; // будем отслеживать открытые структуры: 'd' или 'l'
+    
       while (index < fileString.length) {
         const char = fileString[index];
-        if (char === "d" || char === "l") {
-          depth++;
+    
+        if (char === 'd' || char === 'l') {
+          stack.push(char);
           index++;
-        } else if (char === "e") {
-          depth--;
+        } else if (char === 'e') {
+          stack.pop();
           index++;
-        }else if(char === "i"){
-          index = fileString.indexOf('e', index) + 1;
-        }else if (/\d/.test(char)) {
+          if (stack.length === 0) break; // всё закрыто
+        } else if (char === 'i') {
+          const end = fileString.indexOf('e', index);
+          index = end + 1;
+        } else if (/\d/.test(char)) {
           const colon = fileString.indexOf(':', index);
-          const len = parseInt(fileString.substring(index, colon));
-          index = colon + 1 + len;
+          const length = parseInt(fileString.substring(index, colon));
+          index = colon + 1 + length;
         } else {
-          throw new Error("Unknown format in info dict");
+          throw new Error(`Unexpected character '${char}' at position ${index}`);
         }
       }
+    
       return index;
-    };
-
+    }
     const infoEnd = findInfoEnd(infoStart);
     const infoByteStart = Buffer.byteLength(fileString.substring(0, infoStart), "binary");
     const infoByteEnd = Buffer.byteLength(fileString.substring(0, infoEnd), "binary");
@@ -108,9 +112,7 @@ if (command === "decode") {
     console.log(`Tracker URL: ${anounce}`);
     console.log(`Length: ${length}`);
     console.log(`Info Hash: ${infoHash}`)
-  } catch {
-    console.error("error info");
+  } catch (e) {
+    console.error("error info", e);
   }
-  const fileBuffer = readFileSync(input);
-  const fileString = fileBuffer.toString("binary");
 }
