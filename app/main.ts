@@ -1,5 +1,5 @@
 import {readFileSync} from "fs";
-
+import { createHash } from "crypto";
 function decodeBencode(bencodedValue: string): any {
   function parse(index: number): [any, number] | any {
     const char = bencodedValue[index];
@@ -67,14 +67,17 @@ if (command === "decode") {
   }
 }else if (command === "info"){
   try {
-    const file = readFileSync(input).toString("binary")
-    const torrent = decodeBencode(file)
+    const fileBuffer = readFileSync(input);
+    const fileString = fileBuffer.toString("binary");
+    const torrent = decodeBencode(fileString)
     const anounce = torrent["announce"]
     const length = torrent["info"]?.["length"];
 
     console.log(`Tracker URL: ${anounce}`);
     console.log(`Length: ${length}`);
+    console.log(`Info Hash: ${createHash("sha1").update(fileBuffer).digest("hex")}`)
   }catch{
     console.error("error info")
-  }
+  }const fileBuffer = readFileSync(input);
+    const fileString = fileBuffer.toString("binary");
 }
