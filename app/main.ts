@@ -179,17 +179,20 @@ if (command === "decode") {
         .map((byte) => `%${byte.toString(16).padStart(2, "0")}`)
         .join("");
     }
+    
 
     const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
     const infoHashBuffer = createHash("sha1").update(infoBuffer).digest();
     const announceURL = new URL(announce);
-    announceURL.searchParams.set("info_hash", urlEncode(infoHashBuffer));
-    announceURL.searchParams.set("peer_id", "-PC0001-123456789012");
-    announceURL.searchParams.set("port", "6881");
-    announceURL.searchParams.set("uploaded", "0");
-    announceURL.searchParams.set("downloaded", "0");
-    announceURL.searchParams.set("left", length.toString());
-    announceURL.searchParams.set("compact", "1");
+    const params = new URLSearchParams();
+    params.append("info_hash", infoHashBuffer.toString("binary"));
+    params.append("peer_id", "-PC0001-123456789012");
+    params.append("port", "6881");
+    params.append("uploaded", "0");
+    params.append("downloaded", "0");
+    params.append("left", length.toString());
+    params.append("compact", "1");
+    announceURL.search = params.toString();
 
     const protocol =
       announceURL.protocol === "https:" ? require("https") : require("http");
