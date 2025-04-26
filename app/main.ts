@@ -70,6 +70,8 @@ if (command === "decode") {
     const torrent = decodeBencode(fileString);
     const anounce = torrent["announce"];
     const length = torrent["info"]?.["length"];
+    const pieceLength = torrent["info"]?.["length"]
+    const pieces = torrent["info"]?.["pieces"]
 
     const infoKey = "4:info";
     const infoStart = fileString.indexOf(infoKey) + infoKey.length;
@@ -115,6 +117,14 @@ if (command === "decode") {
     console.log(`Tracker URL: ${anounce}`);
     console.log(`Length: ${length}`);
     console.log(`Info Hash: ${infoHash}`);
+    console.log(`Pieces Length: ${pieceLength}`)
+    console.log(`Pieces Hash:`)
+
+    const pieceBuffer = Buffer.from("pieces", "binary")
+    for(let i = 0; i < pieceBuffer.length; i += 20){
+      const pieceHash = pieceBuffer.subarray(i, i + 20);
+      console.log(pieceHash.toString("hex"));
+    }
   } catch (e) {
     console.error("error info", e);
   }
