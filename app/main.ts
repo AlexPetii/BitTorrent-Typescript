@@ -117,7 +117,7 @@ if (command === "decode") {
     console.log(`Tracker URL: ${anounce}`);
     console.log(`Length: ${length}`);
     console.log(`Info Hash: ${infoHash}`);
-    console.log(`Pieces Length: ${pieceLength}`)
+    console.log(`Piece Length: ${pieceLength}`)
     console.log(`Pieces Hash:`)
 
     const pieceBuffer = Buffer.from(pieces, "binary")
