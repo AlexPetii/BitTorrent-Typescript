@@ -1,5 +1,8 @@
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
+import { request } from "http";
+import { URL } from "url";
+
 function decodeBencode(bencodedValue: string): any {
   function parse(index: number): [any, number] | any {
     const char = bencodedValue[index];
@@ -130,7 +133,88 @@ if (command === "decode") {
   }
 } else if (command === "peers") {
   try {
+    const fileBuffer = readFileSync(input);
+    const fileString = fileBuffer.toString("binary");
+    const torrent = decodeBencode(fileString);
+    const anounce = torrent["announce"];
+    const length = torrent["info"]?.["length"];
+    const infoKey = "4:info";
+    const infoStart = fileString.indexOf(infoKey) + infoKey.length;
+    
+    function findInfoEnd(index: number): number {
+      let stack = [];
+      while (index < fileString.length) {
+        const char = fileString[index];
+        if (char === "d" || char === "l") {
+          stack.push(char);
+          index++;
+        } else if (char === "e") {
+          stack.pop();
+          index++;
+          if (stack.length === 0) break;
+        } else if (char === "i") {
+          const end = fileString.indexOf("e", index);
+          index = end + 1;
+        } else if (/\d/.test(char)) {
+          const colon = fileString.indexOf(":", index);
+          const length = parseInt(fileString.substring(index, colon));
+          index = colon + 1 + length;
+        } else {
+          throw new Error(
+            `Unexpected character '${char}' at position ${index}`
+          );
+        }
+      }
+      return index;
+    }
+
+    const infoEnd = findInfoEnd(infoStart);
+    const infoByteStart = Buffer.byteLength(
+      fileString.substring(0, infoStart),
+      "binary"
+    );
+    const infoByteEnd = Buffer.byteLength(
+      fileString.substring(0, infoEnd),
+      "binary"
+    );
+
+    const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
+    const infoHash = createHash("sha1").update(infoBuffer).digest("hex");
+
+    const peerId = "-PC0001-" + Math.random().toString(36).substring(2, 12).padEnd(12, "0");
+
+    const url = new URL(anounce)
+    url.searchParams.set("info_hash", encodeURIComponent(infoHash.toString()));
+    url.searchParams.set("peer_id", peerId);
+    url.searchParams.set("port", "6881");
+    url.searchParams.set("uploaded", "0");
+    url.searchParams.set("downloaded", "0");
+    url.searchParams.set("left", length.toString());
+    url.searchParams.set("compact", "1");
+    
+    request(url, (res) => {
+      const data: Buffer[] = [];
+      res.on("data", (chunk) => data.push(chunk));
+      res.on("end", () => {
+        const response = Buffer.concat(data).toString("latin1");
+        const decoded = decodeBencode(response);
+
+        if (!decoded["peers"]) {
+          console.error("No peers received:", decoded);
+          return;
+        }
+
+        const peersBuffer = Buffer.from(decoded["peers"], "latin1");
+
+        for (let i = 0; i < peersBuffer.length; i += 6) {
+          const ip = `${peersBuffer[i]}.${peersBuffer[i + 1]}.${peersBuffer[i + 2]}.${peersBuffer[i + 3]}`;
+          const port = peersBuffer.readUInt16BE(i + 4);
+          console.log(`${ip}:${port}`);
+        }
+      });
+    }).end();
   } catch (e) {
     console.log(e);
   }
 }
+
