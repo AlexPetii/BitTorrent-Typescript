@@ -1,7 +1,8 @@
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
-import { request } from "http";
+import { request as httpsRequest } from "https";
 import { URL } from "url";
+import { request } from "http";
 
 function decodeBencode(bencodedValue: string): any {
   function parse(index: number): [any, number] | any {
@@ -63,8 +64,8 @@ if (command === "decode") {
   try {
     const decode = decodeBencode(input);
     console.log(JSON.stringify(decode));
-  } catch {
-    console.error("error decode");
+  } catch (e) {
+    console.error("error decode", e);
   }
 } else if (command === "info") {
   try {
@@ -94,8 +95,8 @@ if (command === "decode") {
           index = end + 1;
         } else if (/\d/.test(char)) {
           const colon = fileString.indexOf(":", index);
-          const length = parseInt(fileString.substring(index, colon));
-          index = colon + 1 + length;
+          const len = parseInt(fileString.substring(index, colon));
+          index = colon + 1 + len;
         } else {
           throw new Error(
             `Unexpected character '${char}' at position ${index}`
@@ -136,13 +137,15 @@ if (command === "decode") {
     const fileBuffer = readFileSync(input);
     const fileString = fileBuffer.toString("binary");
     const torrent = decodeBencode(fileString);
-    const anounce = torrent["announce"];
-    const length = torrent["info"]?.["length"];
+
+    const announce: string = torrent["announce"];
+    const length: number = torrent["info"]?.["length"];
+
     const infoKey = "4:info";
     const infoStart = fileString.indexOf(infoKey) + infoKey.length;
-    
+
     function findInfoEnd(index: number): number {
-      let stack = [];
+      const stack: string[] = [];
       while (index < fileString.length) {
         const char = fileString[index];
         if (char === "d" || char === "l") {
@@ -157,8 +160,8 @@ if (command === "decode") {
           index = end + 1;
         } else if (/\d/.test(char)) {
           const colon = fileString.indexOf(":", index);
-          const length = parseInt(fileString.substring(index, colon));
-          index = colon + 1 + length;
+          const len = parseInt(fileString.substring(index, colon), 10);
+          index = colon + 1 + len;
         } else {
           throw new Error(
             `Unexpected character '${char}' at position ${index}`
@@ -179,24 +182,33 @@ if (command === "decode") {
     );
 
     const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
-    const infoHash = createHash("sha1").update(infoBuffer).digest("hex");
+    const infoHashBinary = createHash("sha1").update(infoBuffer).digest();
 
-    const peerId = "-PC0001-" + Math.random().toString(36).substring(2, 12).padEnd(12, "0");
+    const infoHashEncoded = Array.from(infoHashBinary)
+      .map((b) => `%${b.toString(16).padStart(2, "0")}`)
+      .join("");
 
-    const url = new URL(anounce)
-    url.searchParams.set("info_hash", encodeURIComponent(infoHash.toString()));
-    url.searchParams.set("peer_id", peerId);
-    url.searchParams.set("port", "6881");
-    url.searchParams.set("uploaded", "0");
-    url.searchParams.set("downloaded", "0");
-    url.searchParams.set("left", length.toString());
-    url.searchParams.set("compact", "1");
-    
-    request(url, (res) => {
-      const data: Buffer[] = [];
-      res.on("data", (chunk) => data.push(chunk));
+    const peerId =
+      "-PC0001-" + Math.random().toString(36).substring(2, 14).padEnd(12, "0");
+
+    const query =
+      `info_hash=${infoHashEncoded}` +
+      `&peer_id=${encodeURIComponent(peerId)}` +
+      `&port=6881` +
+      `&uploaded=0` +
+      `&downloaded=0` +
+      `&left=${length}` +
+      `&compact=1`;
+
+    const url = `${announce}?${query}`;
+
+    const client = url.startsWith("https:") ? httpsRequest : request;
+
+    const req = client(url, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => {
-        const response = Buffer.concat(data).toString("latin1");
+        const response = Buffer.concat(chunks).toString("latin1");
         const decoded = decodeBencode(response);
 
         if (!decoded["peers"]) {
@@ -207,14 +219,21 @@ if (command === "decode") {
         const peersBuffer = Buffer.from(decoded["peers"], "latin1");
 
         for (let i = 0; i < peersBuffer.length; i += 6) {
-          const ip = `${peersBuffer[i]}.${peersBuffer[i + 1]}.${peersBuffer[i + 2]}.${peersBuffer[i + 3]}`;
+          const ip = `${peersBuffer[i]}.${peersBuffer[i + 1]}.${
+            peersBuffer[i + 2]
+          }.${peersBuffer[i + 3]}`;
           const port = peersBuffer.readUInt16BE(i + 4);
           console.log(`${ip}:${port}`);
         }
       });
-    }).end();
+    });
+
+    req.on("error", (err) => {
+      console.error("Request error:", err);
+    });
+
+    req.end();
   } catch (e) {
-    console.log(e);
+    console.error("Error:", e);
   }
 }
-
