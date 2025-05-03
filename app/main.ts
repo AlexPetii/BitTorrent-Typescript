@@ -1,7 +1,6 @@
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
 import { request as httpsRequest } from "https";
-import { URL } from "url";
 import { request } from "http";
 
 function decodeBencode(bencodedValue: string): any {
@@ -228,12 +227,100 @@ if (command === "decode") {
       });
     });
 
-    req.on("error", (err) => {
-      console.error("Request error:", err);
+    req.on("error", (e) => {
+      console.error("Request error:", e);
     });
 
     req.end();
   } catch (e) {
     console.error("Error:", e);
+  }
+} else if (command === "handshake") {
+  try {
+    const [torrentPath, peerAddress] = [args[3], args[4]];
+    const [peerHost, peerPort] = peerAddress.split(":");
+
+    const fileBuffer = readFileSync(torrentPath);
+    const fileString = fileBuffer.toString("binary");
+    const torrent = decodeBencode(fileString);
+    const length = torrent["info"]?.["length"];
+
+    const infoKey = "4:info";
+    const infoStart = fileString.indexOf(infoKey) + infoKey.length;
+
+    function findInfoEnd(index: number): number {
+      const stack: string[] = [];
+      while (index < fileString.length) {
+        const char = fileString[index];
+        if (char === "d" || char === "l") {
+          stack.push(char);
+          index++;
+        } else if (char === "e") {
+          stack.pop();
+          index++;
+          if (stack.length === 0) break;
+        } else if (char === "i") {
+          const end = fileString.indexOf("e", index);
+          index = end + 1;
+        } else if (/\d/.test(char)) {
+          const colon = fileString.indexOf(":", index);
+          const len = parseInt(fileString.substring(index, colon));
+          index = colon + 1 + len;
+        } else {
+          throw new Error(
+            `Unexpected character '${char}' at position ${index}`
+          );
+        }
+      }
+      return index;
+    }
+
+    const infoEnd = findInfoEnd(infoStart);
+    const infoByteStart = Buffer.byteLength(
+      fileString.substring(0, infoStart),
+      "binary"
+    );
+    const infoByteEnd = Buffer.byteLength(
+      fileString.substring(0, infoEnd),
+      "binary"
+    );
+
+    const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
+    const infoHash = createHash("sha1").update(infoBuffer).digest();
+
+    const peerId = Buffer.alloc(20);
+    for (let i = 0; i < 20; i++) peerId[i] = Math.floor(Math.random() * 256);
+
+    const net = await import("net");
+    const socket = new net.Socket();
+
+    socket.connect(parseInt(peerPort), peerHost, () => {
+      const pstr = "BitTorrent protocol";
+      const handshake = Buffer.alloc(68);
+      handshake.writeUInt8(pstr.length, 0); 
+      handshake.write(pstr, 1); 
+      infoHash.copy(handshake, 28);
+      peerId.copy(handshake, 48); 
+
+      socket.write(handshake);
+    });
+
+    socket.on("data", (data: Buffer) => {
+      if (data.length < 68) {
+        console.error("Incomplete handshake");
+        socket.destroy();
+        return;
+      }
+
+      const receivedPeerId = data.subarray(48, 68);
+      console.log(`Peer ID: ${receivedPeerId.toString("hex")}`);
+      socket.destroy();
+    });
+
+    socket.on("error", (err) => {
+      console.error("Socket error:", err.message);
+    });
+  } catch (e) {
+    console.error("Handshake error:", e);
   }
 }
