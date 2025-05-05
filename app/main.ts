@@ -325,8 +325,8 @@ if (command === "decode") {
   }
 } else if (command === "download_piece") {
   try {
-    const torrentPath = args[5];
     const outputPath = args[4];
+    const torrentPath = args[5];
     const pieceIndex = parseInt(args[6]);
 
     const fileBuffer = readFileSync(torrentPath);
