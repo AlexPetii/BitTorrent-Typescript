@@ -779,4 +779,19 @@ if (command === "decode") {
   } catch (e) {
     console.error("Download error:", e);
   }
+} else if (command === "magnet_parse") {
+  try {
+    const magnet_link = args[3];
+    const magnetLinkParams = new URLSearchParams(magnet_link.substring(7));
+    console.log(`Tracker URL: ${magnetLinkParams.get("tr")}`);
+    console.log(
+      `Info Hash: ${magnetLinkParams
+        .get("xt")
+        ?.substring(magnetLinkParams.get("xt")?.lastIndexOf(":")! + 1)}`
+    );
+    console.log("wawawa")
+  } catch (error) {
+    console.log("wiwi");
+    console.error(error);
+  }
 }
