@@ -1,8 +1,76 @@
 import { readFileSync, writeFileSync } from "fs";
-import { createHash } from "crypto";
+import { createHash, hash, randomBytes } from "crypto";
 import { request as httpsRequest } from "https";
 import { request } from "http";
+import { createConnection, Socket } from "net";
 import net from "net";
+
+function makeHandshake(client: Socket, hash: string, message?: string) {
+  const peer_id = randomBytes(20).toString("hex");
+  const msg = message || Buffer.alloc(8).toString("hex");
+
+  let peerMessage = `${parseInt("19").toString(16)}${Buffer.from(
+    "BitTorrent protocol"
+  ).toString("hex")}${msg}${hash}${peer_id}`;
+  client.write(new Uint8Array(Buffer.from(peerMessage, "hex")));
+}
+
+function getStringSubset(
+  str: string,
+  hashLength: number = 40,
+  convertToHex: boolean = true
+) {
+  let hashHex = convertToHex ? Buffer.from(str, "latin1").toString("hex") : str;
+  let list = [];
+  while (hashHex.length > 0) {
+    const sub = hashHex.substring(0, hashLength);
+    const rem = hashHex.substring(hashLength);
+    if (!sub) {
+      list.push(hashHex);
+      break;
+    }
+    list.push(sub);
+    hashHex = rem;
+  }
+  return list;
+}
+
+async function getPeers(
+  hash: string,
+  trackerUrl: string,
+  left: string,
+  peer_id: string
+) {
+  const info_hash_encoded = hash
+    .match(/.{1,2}/g)
+    ?.map((byte) => `%${byte}`)
+    .join("");
+  const searchParams = new URLSearchParams({
+    port: "6881",
+    peer_id,
+    uploaded: "0",
+    downloaded: "0",
+    left,
+    compact: "1",
+  });
+  const requestRes = await fetch(
+    `${trackerUrl}?${searchParams.toString()}&info_hash=${info_hash_encoded}`
+  );
+  const responseData = Buffer.from(await requestRes.arrayBuffer()).toString(
+    "latin1"
+  );
+  const resObjDecoded = decodeBencode(responseData) as { peers: string };
+
+  const ipsLatin1 = getStringSubset(resObjDecoded["peers"], 6, false);
+  const ipsWithPort = ipsLatin1.map(
+    (ip) =>
+      `${Array.from(Buffer.from(ip, "latin1").subarray(0, 4)).join(
+        "."
+      )}:${Buffer.from(ip, "latin1").readUInt16BE(4)}`
+  );
+
+  return ipsWithPort;
+}
 
 function decodeBencode(bencodedValue: string): any {
   function parse(index: number): [any, number] | any {
@@ -789,9 +857,38 @@ if (command === "decode") {
         .get("xt")
         ?.substring(magnetLinkParams.get("xt")?.lastIndexOf(":")! + 1)}`
     );
-    console.log("wawawa")
   } catch (error) {
-    console.log("wiwi");
+    console.error(error);
+  }
+}
+if (command === "magnet_handshake") {
+  try {
+    const magnet_link = args[3];
+    const magnetLinkParams = new URLSearchParams(magnet_link.substring(7));
+    const trackerUrl = magnetLinkParams.get("tr");
+    const hash = magnetLinkParams
+      .get("xt")
+      ?.substring(magnetLinkParams.get("xt")?.lastIndexOf(":")! + 1)!;
+    if (trackerUrl) {
+      const peer_id = randomBytes(10).toString("hex");
+      const ipsWithPort = await getPeers(hash, trackerUrl, "16384", peer_id);
+      const [peerIp, port] = ipsWithPort[0].split(":");
+      const extensionMessage = Buffer.alloc(8);
+      extensionMessage.writeUInt8(16, 5);
+
+      const client = createConnection(parseInt(port), peerIp, function () {
+        makeHandshake(client, hash, extensionMessage.toString("hex"));
+      });
+      client.on("data", function (data) {
+        const peerId = data.toString("hex", 48, 68);
+        console.log("Peer ID:", peerId);
+        client.end();
+      });
+      client.on("error", function (err) {
+        console.log("%s", err);
+      });
+    }
+  } catch (error) {
     console.error(error);
   }
 }
