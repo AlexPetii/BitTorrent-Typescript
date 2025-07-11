@@ -621,6 +621,7 @@ if (args[2] === "magnet_handshake") {
       const client = createConnection(parseInt(port), peerIp, function () {
         makeHandshake(client, hash, extensionMessage.toString("hex"));
       });
+
       client.on("data", function (data) {
         const peerId = data.toString("hex", 48, 68);
         console.log("Peer ID:", peerId);
@@ -644,9 +645,6 @@ if (args[2] === "magnet_handshake") {
           client.write(extMsg);
         }
         client.end();
-      });
-      client.on("error", function (err) {
-        console.log("%s", err);
       });
     }
   } catch (error) {
