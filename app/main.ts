@@ -1,17 +1,284 @@
 import { readFileSync, writeFileSync } from "fs";
-import { createHash, hash, randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { request as httpsRequest } from "https";
 import { request } from "http";
 import { createConnection, Socket } from "net";
-import net from "net";
+import { decode } from "punycode";
+
+type BEncodeValue =
+  | string
+  | number
+  | Array<BEncodeValue>
+  | { [key: string]: string | number | BEncodeValue };
+type DecodedFile = {
+  announce: string;
+  info: {
+    length: number;
+    pieces: string;
+    "piece length": number;
+  };
+};
+function decodeBencodeString(value: string): [string, string] {
+  const firstColonIndex = value.indexOf(":");
+  if (firstColonIndex === -1) {
+    throw new Error("Invalid encoded value");
+  }
+  const stringLength = parseInt(value.substring(0, firstColonIndex));
+  if (isNaN(stringLength)) {
+    throw new Error("Invalid encoded value");
+  }
+  return [
+    value.substring(firstColonIndex + 1, firstColonIndex + stringLength + 1),
+    value.substring(firstColonIndex + stringLength + 1),
+  ];
+}
+
+function decondeBencondeInt(value: string): [number, string] {
+  return [
+    parseInt(value.substring(1, value.indexOf("e"))),
+    value.substring(value.indexOf("e") + 1),
+  ];
+}
+
+function decodeBencodeArray(value: string): [BEncodeValue, string] {
+  let arrayBencodedString = value.substring(1, value.lastIndexOf("e"));
+  const finalArrayBencode = [];
+
+  while (arrayBencodedString.length > 0) {
+    //if the first string is integer get the string
+    if (!isNaN(parseInt(arrayBencodedString[0]))) {
+      const [value, restString] = decodeBencodeString(arrayBencodedString);
+      finalArrayBencode.push(value);
+      arrayBencodedString = restString;
+    }
+    if (arrayBencodedString[0] === "i") {
+      const [value, restString] = decondeBencondeInt(arrayBencodedString);
+      finalArrayBencode.push(value);
+      arrayBencodedString = restString;
+    }
+    if (arrayBencodedString[0] === "l") {
+      let [value, restString] = decodeBencodeArray(arrayBencodedString);
+      finalArrayBencode.push(value);
+      arrayBencodedString = restString;
+    }
+    if (arrayBencodedString[0] === "e") {
+      arrayBencodedString = arrayBencodedString.substring(1) + "e";
+      // if there is a trailing e then bencode is not encoded properly
+      if (arrayBencodedString.length < 2) {
+        throw new Error("Invalid encoded value");
+      }
+      break;
+    }
+  }
+
+  return [finalArrayBencode, arrayBencodedString];
+}
+
+function decodeBencodeObject(value: string) {
+  //d3:foo3:bar5:helloi52ee
+  let bencodedString = value.substring(1, value.lastIndexOf("e"));
+  const finalObjectBencode: {
+    [key: string]: string | number | BEncodeValue;
+  } = {};
+
+  while (bencodedString.length > 0) {
+    if (isNaN(parseInt(bencodedString[0]))) {
+      throw new Error("invalid object key");
+    }
+    const [key, rest] = decodeBencodeString(bencodedString);
+    if (!isNaN(parseInt(rest[0]))) {
+      const [value, restString] = decodeBencodeString(rest);
+      finalObjectBencode[key] = value;
+      bencodedString = restString;
+    }
+    if (rest[0] === "i") {
+      const [value, restString] = decondeBencondeInt(rest);
+      finalObjectBencode[key] = value;
+      bencodedString = restString;
+    }
+    if (rest[0] === "l") {
+      let [value, restString] = decodeBencodeArray(rest);
+      finalObjectBencode[key] = value;
+      bencodedString = restString;
+    }
+    if (rest[0] === "d") {
+      let [value, restString] = decodeBencodeObject(rest);
+      finalObjectBencode[key] = value;
+      if (typeof restString === "string") bencodedString = restString;
+    }
+  }
+  return [finalObjectBencode, bencodedString];
+}
+function decodeBencode(bencodedValue: string): BEncodeValue {
+  if (!isNaN(parseInt(bencodedValue[0]))) {
+    const [value, _] = decodeBencodeString(bencodedValue);
+    return value;
+  }
+  if (bencodedValue[0] === "i") {
+    const [value, _] = decondeBencondeInt(bencodedValue);
+    return value;
+  } else if (bencodedValue[0] === "l") {
+    const [finalArrayBencode, _] = decodeBencodeArray(bencodedValue);
+    return finalArrayBencode;
+  } else if (bencodedValue[0] === "d") {
+    const [object, _] = decodeBencodeObject(bencodedValue);
+    return object;
+  }
+
+  throw new Error("Only strings are supported at the moment");
+}
+
+function parseTorrentFile(fileName: string) {
+  const file = readFileSync(fileName, { encoding: "latin1" });
+  return decodeBencode(file) as DecodedFile;
+}
+
+function encodeNumber(num: number) {
+  return `i${num}e`;
+}
+function encodeString(str: string) {
+  return `${str.length}:${str}`;
+}
+
+function encodeList(arr: Array<BEncodeValue>) {
+  let string = "l";
+  for (const value of arr) {
+    if (typeof value === "string") {
+      string = string + `${encodeString(value)}`;
+    }
+    if (typeof value === "number") {
+      string = string + `${encodeNumber(value)}`;
+    }
+    if (Array.isArray(value)) {
+      string = string + encodeList(value);
+    }
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      typeof value !== "function"
+    ) {
+      string = string + encodeObject(value);
+    }
+  }
+  string = string + "e";
+  return string;
+}
+
+function encodeObject(obj: { [key: string]: string | number | BEncodeValue }) {
+  let string = "";
+  for (const key in obj) {
+    const keyEncoded = encodeString(key);
+    const value = obj[key];
+    if (typeof value === "string") {
+      string += `${keyEncoded}${encodeString(value)}`;
+    }
+    if (typeof value === "number") {
+      string += `${keyEncoded}${encodeNumber(value)}`;
+    }
+    if (Array.isArray(value)) {
+      string += `${keyEncoded}${encodeList(value)}`;
+    }
+    if (
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof value !== "function"
+    ) {
+      string += `${keyEncoded}${encodeObject(value)}`;
+    }
+  }
+
+  return `d${string}e`;
+}
+
+function getStringSubsets(
+  str: string,
+  hashLength: number = 40,
+  convertToHex: boolean = true
+) {
+  let hashHex = convertToHex ? Buffer.from(str, "latin1").toString("hex") : str;
+  let list = [];
+  while (hashHex.length > 0) {
+    const sub = hashHex.substring(0, hashLength);
+    const rem = hashHex.substring(hashLength);
+    if (!sub) {
+      list.push(hashHex);
+      break;
+    }
+    list.push(sub);
+    hashHex = rem;
+  }
+  return list;
+}
+
+function getDecodedAndInfoHash(filename: string) {
+  const decoded = parseTorrentFile(filename);
+  if (!decoded["announce"] || !decoded["info"]) {
+    throw new Error("Invalid encoded value");
+  }
+  const encodedInfo = encodeObject(decoded["info"]);
+  const hash = createHash("sha1")
+    .update(Buffer.from(encodedInfo, "latin1"))
+    .digest("hex");
+  return {
+    decodedTorrentFile: decoded,
+    hash,
+  };
+}
+
+function decodedPeerMessage(buffer: Buffer) {
+  return {
+    messageLength: buffer.readInt32BE(0),
+    messageType: buffer.readIntBE(4, 1),
+    payload: buffer.subarray(5),
+  };
+}
+
+async function getPeers(
+  hash: string,
+  trackerUrl: string,
+  left: string,
+  peer_id: string
+) {
+  const info_hash_encoded = hash
+    .match(/.{1,2}/g)
+    ?.map((byte) => `%${byte}`)
+    .join("");
+
+  const searchParams = new URLSearchParams({
+    port: "6881",
+    peer_id,
+    uploaded: "0",
+    downloaded: "0",
+    left,
+    compact: "1",
+  });
+
+  const requestRes = await fetch(
+    `${trackerUrl}?${searchParams.toString()}&info_hash=${info_hash_encoded}`
+  );
+  const responseData = Buffer.from(await requestRes.arrayBuffer()).toString(
+    "latin1"
+  );
+  const resObjDecoded = decodeBencode(responseData) as { peers: string };
+
+  const ipsLatin1 = getStringSubsets(resObjDecoded["peers"], 6, false);
+  const ipsWithPort = ipsLatin1.map(
+    (ip) =>
+      `${Array.from(Buffer.from(ip, "latin1").subarray(0, 4)).join(
+        "."
+      )}:${Buffer.from(ip, "latin1").readUint16BE(4)}`
+  ); // port number needs to use the two 16bytes
+  return ipsWithPort;
+}
 
 function makeHandshake(client: Socket, hash: string, message?: string) {
   const peer_id = randomBytes(20).toString("hex");
   const msg = message || Buffer.alloc(8).toString("hex");
-
   let peerMessage = `${parseInt("19").toString(16)}${Buffer.from(
     "BitTorrent protocol"
   ).toString("hex")}${msg}${hash}${peer_id}`;
+
   client.write(new Uint8Array(Buffer.from(peerMessage, "hex")));
 }
 
@@ -35,819 +302,294 @@ function getStringSubset(
   return list;
 }
 
-async function getPeers(
-  hash: string,
-  trackerUrl: string,
-  left: string,
-  peer_id: string
-) {
-  const info_hash_encoded = hash
-    .match(/.{1,2}/g)
-    ?.map((byte) => `%${byte}`)
-    .join("");
-  const searchParams = new URLSearchParams({
-    port: "6881",
-    peer_id,
-    uploaded: "0",
-    downloaded: "0",
-    left,
-    compact: "1",
-  });
-  const requestRes = await fetch(
-    `${trackerUrl}?${searchParams.toString()}&info_hash=${info_hash_encoded}`
-  );
-  const responseData = Buffer.from(await requestRes.arrayBuffer()).toString(
-    "latin1"
-  );
-  const resObjDecoded = decodeBencode(responseData) as { peers: string };
-
-  const ipsLatin1 = getStringSubset(resObjDecoded["peers"], 6, false);
-  const ipsWithPort = ipsLatin1.map(
-    (ip) =>
-      `${Array.from(Buffer.from(ip, "latin1").subarray(0, 4)).join(
-        "."
-      )}:${Buffer.from(ip, "latin1").readUInt16BE(4)}`
-  );
-
-  return ipsWithPort;
-}
-
-function decodeBencode(bencodedValue: string): any {
-  function parse(index: number): [any, number] | any {
-    const char = bencodedValue[index];
-
-    switch (char) {
-      case "i": {
-        const end = bencodedValue.indexOf("e", index);
-        const number = parseInt(bencodedValue.substring(index + 1, end));
-        return [number, end + 1];
-      }
-      case "l": {
-        const list: any[] = [];
-        index++;
-        while (bencodedValue[index] !== "e") {
-          const [value, nextIndex] = parse(index);
-          list.push(value);
-          index = nextIndex;
-        }
-        return [list, index + 1];
-      }
-      case "d": {
-        const dict: Record<string, any> = {};
-        index++;
-        while (bencodedValue[index] !== "e") {
-          const [key, keyIndex] = parse(index);
-          if (typeof key !== "string") {
-            throw new Error(`Invalid key of index ${index}, must be string`);
-          }
-          const [value, nextIndex] = parse(keyIndex);
-          dict[key] = value;
-          index = nextIndex;
-        }
-        return [dict, index + 1];
-      }
-      default: {
-        if (/\d/.test(char)) {
-          const colon = bencodedValue.indexOf(":", index);
-          const length = parseInt(bencodedValue.substring(index, colon));
-          const start = colon + 1;
-          const end = start + length;
-          const str = bencodedValue.substring(start, end);
-          return [str, end];
-        } else {
-          throw new Error(`Unexpected character: ${char}`);
-        }
-      }
-    }
-  }
-  const [result] = parse(0);
-  return result;
-}
-
 const args = process.argv;
-const command = args[2];
-const input = args[3];
 
-if (command === "decode") {
+if (args[2] === "decode") {
   try {
-    const decode = decodeBencode(input);
+    const bencodedValue = args[3];
+    const decode = decodeBencode(bencodedValue);
     console.log(JSON.stringify(decode));
-  } catch (e) {
-    console.error("error decode", e);
+  } catch (error) {
+    console.error(error);
   }
-} else if (command === "info") {
+}
+
+if (args[2] === "info") {
   try {
-    const fileBuffer = readFileSync(input);
-    const fileString = fileBuffer.toString("binary");
-    const torrent = decodeBencode(fileString);
-    const anounce = torrent["announce"];
-    const length = torrent["info"]?.["length"];
-    const pieceLength = torrent["info"]?.["piece length"];
-    const pieces = torrent["info"]?.["pieces"];
-
-    const infoKey = "4:info";
-    const infoStart = fileString.indexOf(infoKey) + infoKey.length;
-    function findInfoEnd(index: number): number {
-      let stack = [];
-      while (index < fileString.length) {
-        const char = fileString[index];
-        if (char === "d" || char === "l") {
-          stack.push(char);
-          index++;
-        } else if (char === "e") {
-          stack.pop();
-          index++;
-          if (stack.length === 0) break;
-        } else if (char === "i") {
-          const end = fileString.indexOf("e", index);
-          index = end + 1;
-        } else if (/\d/.test(char)) {
-          const colon = fileString.indexOf(":", index);
-          const len = parseInt(fileString.substring(index, colon));
-          index = colon + 1 + len;
-        } else {
-          throw new Error(
-            `Unexpected character '${char}' at position ${index}`
-          );
-        }
-      }
-      return index;
-    }
-    const infoEnd = findInfoEnd(infoStart);
-    const infoByteStart = Buffer.byteLength(
-      fileString.substring(0, infoStart),
-      "binary"
+    const fileName = args[3];
+    const { decodedTorrentFile: decoded, hash } =
+      getDecodedAndInfoHash(fileName);
+    const pieceHashes = getStringSubsets(decoded["info"]["pieces"]);
+    console.log(
+      `Tracker URL: ${decoded["announce"]} \nLength: ${decoded["info"].length} \nPiece Length: ${decoded["info"]["piece length"]} \nPiece Hashes: .length`
     );
-    const infoByteEnd = Buffer.byteLength(
-      fileString.substring(0, infoEnd),
-      "binary"
-    );
-
-    const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
-    const infoHash = createHash("sha1").update(infoBuffer).digest("hex");
-
-    console.log(`Tracker URL: ${anounce}`);
-    console.log(`Length: ${length}`);
-    console.log(`Info Hash: ${infoHash}`);
-    console.log(`Piece Length: ${pieceLength}`);
-    console.log(`Pieces Hash:`);
-
-    const pieceBuffer = Buffer.from(pieces, "binary");
-    for (let i = 0; i < pieceBuffer.length; i += 20) {
-      const pieceHash = pieceBuffer.subarray(i, i + 20);
-      console.log(pieceHash.toString("hex"));
-    }
-  } catch (e) {
-    console.error("error info", e);
+  } catch (error) {
+    console.error(error);
   }
-} else if (command === "peers") {
+}
+if (args[2] === "peers") {
   try {
-    const fileBuffer = readFileSync(input);
-    const fileString = fileBuffer.toString("binary");
-    const torrent = decodeBencode(fileString);
-
-    const announce: string = torrent["announce"];
-    const length: number = torrent["info"]?.["length"];
-
-    const infoKey = "4:info";
-    const infoStart = fileString.indexOf(infoKey) + infoKey.length;
-
-    function findInfoEnd(index: number): number {
-      const stack: string[] = [];
-      while (index < fileString.length) {
-        const char = fileString[index];
-        if (char === "d" || char === "l") {
-          stack.push(char);
-          index++;
-        } else if (char === "e") {
-          stack.pop();
-          index++;
-          if (stack.length === 0) break;
-        } else if (char === "i") {
-          const end = fileString.indexOf("e", index);
-          index = end + 1;
-        } else if (/\d/.test(char)) {
-          const colon = fileString.indexOf(":", index);
-          const len = parseInt(fileString.substring(index, colon), 10);
-          index = colon + 1 + len;
-        } else {
-          throw new Error(
-            `Unexpected character '${char}' at position ${index}`
-          );
-        }
-      }
-      return index;
-    }
-
-    const infoEnd = findInfoEnd(infoStart);
-    const infoByteStart = Buffer.byteLength(
-      fileString.substring(0, infoStart),
-      "binary"
+    const fileName = args[3];
+    const { decodedTorrentFile: decoded, hash } =
+      getDecodedAndInfoHash(fileName);
+    const baseUrl = decoded["announce"];
+    const peer_id = randomBytes(10).toString("hex");
+    const ipsWithPort = await getPeers(
+      hash,
+      decoded["announce"],
+      decoded["info"].length.toString(),
+      peer_id
     );
-    const infoByteEnd = Buffer.byteLength(
-      fileString.substring(0, infoEnd),
-      "binary"
-    );
+    ipsWithPort.forEach((e) => console.log(e));
+  } catch (error) {
+    console.error(error);
+  }
+}
+if (args[2] === "handshake") {
+  try {
+    const fileName = args[3];
+    const [peerIp, port] = args[4].split(":");
+    const { decodedTorrentFile: decoded, hash } =
+      getDecodedAndInfoHash(fileName);
+    const client = createConnection(parseInt(port), peerIp, function () {
+      makeHandshake(client, hash);
 
-    const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
-    const infoHashBinary = createHash("sha1").update(infoBuffer).digest();
-
-    const infoHashEncoded = Array.from(infoHashBinary)
-      .map((b) => `%${b.toString(16).padStart(2, "0")}`)
-      .join("");
-
-    const peerId =
-      "-PC0001-" + Math.random().toString(36).substring(2, 14).padEnd(12, "0");
-
-    const query =
-      `info_hash=${infoHashEncoded}` +
-      `&peer_id=${encodeURIComponent(peerId)}` +
-      `&port=6881` +
-      `&uploaded=0` +
-      `&downloaded=0` +
-      `&left=${length}` +
-      `&compact=1`;
-
-    const url = `${announce}?${query}`;
-
-    const client = url.startsWith("https:") ? httpsRequest : request;
-
-    const req = client(url, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        const response = Buffer.concat(chunks).toString("latin1");
-        const decoded = decodeBencode(response);
-
-        if (!decoded["peers"]) {
-          console.error("No peers received:", decoded);
-          return;
-        }
-
-        const peersBuffer = Buffer.from(decoded["peers"], "latin1");
-
-        for (let i = 0; i < peersBuffer.length; i += 6) {
-          const ip = `${peersBuffer[i]}.${peersBuffer[i + 1]}.${
-            peersBuffer[i + 2]
-          }.${peersBuffer[i + 3]}`;
-          const port = peersBuffer.readUInt16BE(i + 4);
-          console.log(`${ip}:${port}`);
-        }
+      client.on("data", function (data) {
+        const peerId = data.toString("hex", data.byteLength - 20);
+        console.log(`Peer ID:`, peerId);
+        client.end();
+      });
+      client.on(`error`, function (err) {
+        console.log(`$s`, err);
       });
     });
-
-    req.on("error", (e) => {
-      console.error("Request error:", e);
-    });
-
-    req.end();
-  } catch (e) {
-    console.error("Error:", e);
+  } catch (error) {
+    console.error(error);
   }
-} else if (command === "handshake") {
+}
+if (args[2] === "download_piece") {
+  const outputPath = args[4];
+  const torrentPath = args[5];
+  const pieceIndex = parseInt(args[6]);
+
   try {
-    const [torrentPath, peerAddress] = [args[3], args[4]];
-    const [peerHost, peerPort] = peerAddress.split(":");
-
-    const fileBuffer = readFileSync(torrentPath);
-    const fileString = fileBuffer.toString("binary");
-    const torrent = decodeBencode(fileString);
-    const length = torrent["info"]?.["length"];
-
-    const infoKey = "4:info";
-    const infoStart = fileString.indexOf(infoKey) + infoKey.length;
-
-    function findInfoEnd(index: number): number {
-      const stack: string[] = [];
-      while (index < fileString.length) {
-        const char = fileString[index];
-        if (char === "d" || char === "l") {
-          stack.push(char);
-          index++;
-        } else if (char === "e") {
-          stack.pop();
-          index++;
-          if (stack.length === 0) break;
-        } else if (char === "i") {
-          const end = fileString.indexOf("e", index);
-          index = end + 1;
-        } else if (/\d/.test(char)) {
-          const colon = fileString.indexOf(":", index);
-          const len = parseInt(fileString.substring(index, colon));
-          index = colon + 1 + len;
-        } else {
-          throw new Error(
-            `Unexpected character '${char}' at position ${index}`
-          );
-        }
-      }
-      return index;
-    }
-
-    const infoEnd = findInfoEnd(infoStart);
-    const infoByteStart = Buffer.byteLength(
-      fileString.substring(0, infoStart),
-      "binary"
-    );
-    const infoByteEnd = Buffer.byteLength(
-      fileString.substring(0, infoEnd),
-      "binary"
+    const { decodedTorrentFile: decoded, hash } =
+      getDecodedAndInfoHash(torrentPath);
+    const peer_id1 = randomBytes(10).toString("hex");
+    const ipsWithPort = await getPeers(
+      hash,
+      decoded["announce"],
+      decoded["info"].length.toString(),
+      peer_id1
     );
 
-    const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
-    const infoHash = createHash("sha1").update(infoBuffer).digest();
-
-    const peerId = Buffer.alloc(20);
-    for (let i = 0; i < 20; i++) peerId[i] = Math.floor(Math.random() * 256);
-
-    const socket = new net.Socket();
-
-    socket.connect(parseInt(peerPort), peerHost, () => {
-      const pstr = "BitTorrent protocol";
-      const handshake = Buffer.alloc(68);
-      handshake.writeUInt8(pstr.length, 0);
-      handshake.write(pstr, 1);
-      infoHash.copy(handshake, 28);
-      peerId.copy(handshake, 48);
-
-      socket.write(handshake);
+    const [peerIp, port] = ipsWithPort[0].split(":");
+    const client = createConnection(parseInt(port), peerIp, function () {
+      console.log("Connected to peer");
     });
+    makeHandshake(client, hash);
 
-    socket.on("data", (data: Buffer) => {
-      if (data.length < 68) {
-        console.error("Incomplete handshake");
-        socket.destroy();
-        return;
-      }
+    client.once("data", function (data) {
+      const peerId = data.toString("hex", data.byteLength - 20);
+      console.log("Peer ID:", peerId);
+      client.write(new Uint8Array(Buffer.from([0, 0, 0, 1, 2])));
 
-      const receivedPeerId = data.subarray(48, 68);
-      console.log(`Peer ID: ${receivedPeerId.toString("hex")}`);
-      socket.destroy();
-    });
-
-    socket.on("error", (err) => {
-      console.error("Socket error:", err.message);
-    });
-  } catch (e) {
-    console.error("Handshake error:", e);
-  }
-} else if (command === "download_piece") {
-  try {
-    const outputPath = args[4];
-    const torrentPath = args[5];
-    const pieceIndex = parseInt(args[6]);
-
-    if (isNaN(pieceIndex)) {
-      throw new Error("Invalid piece index");
-    }
-
-    const fileBuffer = readFileSync(torrentPath);
-    const fileString = fileBuffer.toString("binary");
-    const torrent = decodeBencode(fileString);
-    const announce = torrent["announce"];
-    const info = torrent["info"];
-    const pieceLength = info["piece length"];
-    const pieces = info["pieces"];
-    const totalLength = info["length"];
-
-    const infoKey = "4:info";
-    const infoStart = fileString.indexOf(infoKey) + infoKey.length;
-
-    function findInfoEnd(index: number): number {
-      const stack: string[] = [];
-      while (index < fileString.length) {
-        const char = fileString[index];
-        if (char === "d" || char === "l") {
-          stack.push(char);
-          index++;
-        } else if (char === "e") {
-          stack.pop();
-          index++;
-          if (stack.length === 0) break;
-        } else if (char === "i") {
-          const end = fileString.indexOf("e", index);
-          index = end + 1;
-        } else if (/\d/.test(char)) {
-          const colon = fileString.indexOf(":", index);
-          const len = parseInt(fileString.substring(index, colon));
-          index = colon + 1 + len;
-        } else {
-          throw new Error(`Unexpected character '${char}' at ${index}`);
-        }
-      }
-      return index;
-    }
-
-    const infoEnd = findInfoEnd(infoStart);
-    const infoByteStart = Buffer.byteLength(
-      fileString.substring(0, infoStart),
-      "binary"
-    );
-    const infoByteEnd = Buffer.byteLength(
-      fileString.substring(0, infoEnd),
-      "binary"
-    );
-    const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
-    const infoHash = createHash("sha1").update(infoBuffer).digest();
-
-    const infoHashEncoded = Array.from(infoHash)
-      .map((b) => `%${b.toString(16).padStart(2, "0")}`)
-      .join("");
-
-    const peerIdStr =
-      "-PC0001-" + Math.random().toString(36).substring(2, 14).padEnd(12, "0");
-    const peerId = Buffer.from(peerIdStr, "utf-8");
-
-    const query =
-      `info_hash=${infoHashEncoded}` +
-      `&peer_id=${encodeURIComponent(peerIdStr)}` +
-      `&port=6881` +
-      `&uploaded=0` +
-      `&downloaded=0` +
-      `&left=${totalLength}` +
-      `&compact=1`;
-
-    const url = `${announce}?${query}`;
-    const client = url.startsWith("https:") ? httpsRequest : request;
-
-    const req = client(url, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        const response = Buffer.concat(chunks).toString("latin1");
-        let decoded: any;
-
-        try {
-          decoded = decodeBencode(response);
-          console.log("Tracker response (decoded):", decoded);
-          if (decoded["failure reason"]) {
-            console.error("Tracker failure:", decoded["failure reason"]);
-            return;
-          }
-        } catch (e) {
-          console.error("Failed to decode tracker response");
-          return;
-        }
-
-        const peersRaw = decoded["peers"];
-        const peersBuffer = Buffer.from(peersRaw, "binary");
-
-        if (peersBuffer.length < 6) {
-          console.error("Invalid peer data");
-          return;
-        }
-
-        const ip = `${peersBuffer[0]}.${peersBuffer[1]}.${peersBuffer[2]}.${peersBuffer[3]}`;
-        const port = peersBuffer.readUInt16BE(4);
-        const socket = new net.Socket();
-
-        const BLOCK_LEN = 16 * 1024;
-        const pieceOffset = pieceIndex * pieceLength;
-        const lastPieceLength = Math.min(
-          pieceLength,
-          totalLength - pieceOffset
-        );
-        const numBlocks = Math.ceil(lastPieceLength / BLOCK_LEN);
-        const blocks: (Buffer | undefined)[] = new Array(numBlocks).fill(
-          undefined
-        );
-
-        const handshake = Buffer.alloc(68);
-        const pstr = "BitTorrent protocol";
-        handshake.writeUInt8(pstr.length, 0);
-        handshake.write(pstr, 1);
-        infoHash.copy(handshake, 28);
-        peerId.copy(handshake, 48);
-
-        socket.setTimeout(10000, () => {
-          console.error("Socket timeout");
-          socket.destroy();
-        });
-
-        socket.connect(port, ip, () => {
-          socket.write(handshake);
-        });
-
-        let stage = "handshake";
+      (function () {
+        let fileData: Buffer[] = [];
+        const BYTE_LENGTH = 16 * 1024;
         let buffer = Buffer.alloc(0);
 
-        socket.on("data", (data: Buffer) => {
-          buffer = Buffer.concat([buffer, data]);
-
-          if (stage === "handshake" && buffer.length >= 68) {
-            const receivedInfoHash = buffer.subarray(28, 48);
-            if (!receivedInfoHash.equals(infoHash)) {
-              console.error("InfoHash mismatch");
-              socket.destroy();
-              return;
+        client.on("data", function (data) {
+          buffer = Buffer.concat([
+            new Uint8Array(buffer),
+            new Uint8Array(data),
+          ]);
+          while (buffer.length >= 5) {
+            const messageLength = buffer.readInt32BE(0); // read message length
+            const totalLength = 4 + messageLength; // total length of message
+            if (buffer.length < totalLength) {
+              break; // wait fro more data
             }
-            stage = "bitfield";
-            buffer = buffer.subarray(68);
-          }
+            const msgBuffer = buffer.subarray(0, totalLength);
+            buffer = buffer.subarray(totalLength);
+            const message = decodedPeerMessage(msgBuffer);
+            const pieceLength = Math.min(
+              decoded.info["length"] -
+                pieceIndex * decoded.info["piece length"],
+              decoded.info["piece length"]
+            );
 
-          while (buffer.length >= 4) {
-            const length = buffer.readUInt32BE(0);
-            if (buffer.length < 4 + length) break;
-
-            const id = buffer[4];
-            const payload = buffer.subarray(5, 4 + length);
-
-            if (id === 5 && stage === "bitfield") {
-              socket.write(Buffer.from([0, 0, 0, 1, 2]));
-              stage = "interested";
-            } else if (id === 1 && stage === "interested") {
-              stage = "unchoked";
-              for (let i = 0; i < numBlocks; i++) {
-                const begin = i * BLOCK_LEN;
-                const reqLen =
-                  i === numBlocks - 1 ? lastPieceLength - begin : BLOCK_LEN;
-                const request = Buffer.alloc(17);
-                request.writeUInt32BE(13, 0);
-                request.writeUInt8(6, 4);
-                request.writeUInt32BE(pieceIndex, 5);
-                request.writeUInt32BE(begin, 9);
-                request.writeUInt32BE(reqLen, 13);
-                socket.write(request);
-              }
-            } else if (id === 7 && stage === "unchoked") {
-              //   const pieceIdx = payload.readUInt32BE(0);
-              const begin = payload.readUInt32BE(4);
-              const block = payload.subarray(8);
-              const blockIndex = Math.floor(begin / BLOCK_LEN);
-
-              if (blockIndex >= 0 && blockIndex < numBlocks) {
-                blocks[blockIndex] = block;
-              }
-
-              const missingBlocks = blocks
-                .map((b, i) => (b instanceof Buffer ? null : i))
-                .filter((i) => i !== null) as number[];
-
-              if (missingBlocks.length === 0) {
-                const piece = Buffer.concat(blocks as Buffer[]);
-                const hash = createHash("sha1").update(piece).digest("hex");
-                const expected = Buffer.from(pieces, "binary")
-                  .subarray(pieceIndex * 20, (pieceIndex + 1) * 20)
-                  .toString("hex");
-
-                if (hash !== expected) {
-                  console.error("Piece hash mismatch");
+            // unchoke
+            if (message.messageType === 1) {
+              let sendMessage = true;
+              let currentPieceIndex = 0;
+              while (sendMessage) {
+                const remainingPayload =
+                  pieceLength - currentPieceIndex * BYTE_LENGTH;
+                let payloadMessage: Buffer = Buffer.alloc(17);
+                //first part length of the message
+                payloadMessage.writeInt32BE(13, 0);
+                payloadMessage.writeInt8(6, 4);
+                payloadMessage.writeInt32BE(pieceIndex, 5);
+                payloadMessage.writeInt32BE(currentPieceIndex * BYTE_LENGTH, 9);
+                if (remainingPayload > BYTE_LENGTH) {
+                  // go for bytelength
+                  payloadMessage.writeInt32BE(BYTE_LENGTH, 13);
                 } else {
-                  writeFileSync(outputPath, piece);
-                  console.log("Piece saved:", outputPath);
+                  // go for the remainder of the bytes
+                  payloadMessage.writeInt32BE(
+                    Math.abs(
+                      remainingPayload === 0 ? BYTE_LENGTH : remainingPayload
+                    ),
+                    13
+                  );
+                  sendMessage = false;
                 }
-                socket.destroy();
-              } else {
-                console.warn(
-                  `Still waiting for blocks: ${missingBlocks.join(", ")}`
-                );
+                currentPieceIndex++;
+                client.write(new Uint8Array(payloadMessage));
+              }
+            } else if (message.messageType === 5) {
+              console.log("Received bitfield message");
+            } else if (message.messageType === 7) {
+              const returnedPieceIndex = message.payload.readInt32BE(0);
+              const returnedPieceOffset = message.payload.readInt32BE(4);
+              fileData[returnedPieceOffset / BYTE_LENGTH] =
+                message.payload.subarray(8);
+              const currentDownloaded =
+                returnedPieceOffset + message.payload.subarray(8).length;
+              if (currentDownloaded === pieceLength) {
+                const pieceHashes = getStringSubsets(decoded["info"]["pieces"]);
+                const downloadhash = createHash("sha1")
+                  .update(Buffer.concat(fileData))
+                  .digest("hex");
+
+                if (pieceHashes[pieceIndex] === downloadhash) {
+                  writeFileSync(outputPath, Buffer.concat(fileData));
+                }
+                process.exit(0);
               }
             }
-
-            buffer = buffer.subarray(4 + length);
           }
-        });
-
-        socket.on("error", (e) => {
-          console.error("Socket error:", e);
         });
       });
     });
+  } catch (error) {
+    console.error(error);
+  }
+}
+if (args[2] === "download") {
+  const outputFile = args[4];
+  const torrentFileName = args[5];
+  try {
+    const { decodedTorrentFile: decoded, hash } =
+      getDecodedAndInfoHash(torrentFileName);
 
-    req.on("error", (e) => {
-      console.error("Tracker request error:", e);
+    const peer_id1 = randomBytes(10).toString("hex");
+    const ipsWithPort = await getPeers(
+      hash,
+      decoded["announce"],
+      decoded["info"].length.toString(),
+      peer_id1
+    );
+
+    const [peerIp, port] = ipsWithPort[0].split(":");
+
+    const client = createConnection(parseInt(port), peerIp, function () {
+      // console.log('Connected to peer');
     });
 
-    req.end();
-  } catch (e) {
-    console.error("Download error:", e);
-  }
-} else if (command === "download") {
-  try {
-    const outputPath = args[4];
-    const torrentPath = args[5];
+    makeHandshake(client, hash);
 
-    const fileBuffer = readFileSync(torrentPath);
-    const fileString = fileBuffer.toString("binary");
-    const torrent = decodeBencode(fileString);
-    const announce = torrent["announce"];
-    const info = torrent["info"];
-    const pieceLength = info["piece length"];
-    const pieces = info["pieces"];
-    const totalLength = info["length"];
+    client.once("data", function (data) {
+      const peerId = data.toString("hex", data.byteLength - 20);
+      console.log("Peer ID:", peerId);
+      // send interested message for the piece
+      client.write(new Uint8Array(Buffer.from([0, 0, 0, 1, 2])));
 
-    const infoKey = "4:info";
-    const infoStart = fileString.indexOf(infoKey) + infoKey.length;
-
-    function findInfoEnd(index: number): number {
-      const stack: string[] = [];
-      while (index < fileString.length) {
-        const char = fileString[index];
-        if (char === "d" || char === "l") {
-          stack.push(char);
-          index++;
-        } else if (char === "e") {
-          stack.pop();
-          index++;
-          if (stack.length === 0) break;
-        } else if (char === "i") {
-          const end = fileString.indexOf("e", index);
-          index = end + 1;
-        } else if (/\d/.test(char)) {
-          const colon = fileString.indexOf(":", index);
-          const len = parseInt(fileString.substring(index, colon));
-          index = colon + 1 + len;
-        } else {
-          throw new Error(`Unexpected character '${char}' at ${index}`);
-        }
-      }
-      return index;
-    }
-
-    const infoEnd = findInfoEnd(infoStart);
-    const infoByteStart = Buffer.byteLength(
-      fileString.substring(0, infoStart),
-      "binary"
-    );
-    const infoByteEnd = Buffer.byteLength(
-      fileString.substring(0, infoEnd),
-      "binary"
-    );
-    const infoBuffer = fileBuffer.subarray(infoByteStart, infoByteEnd);
-    const infoHash = createHash("sha1").update(infoBuffer).digest();
-    const infoHashEncoded = Array.from(infoHash)
-      .map((b) => `%${b.toString(16).padStart(2, "0")}`)
-      .join("");
-
-    const peerIdStr =
-      "-PC0001-" + Math.random().toString(36).substring(2, 14).padEnd(12, "0");
-    const peerId = Buffer.from(peerIdStr, "utf-8");
-
-    const query = `info_hash=${infoHashEncoded}&peer_id=${encodeURIComponent(
-      peerIdStr
-    )}&port=6881&uploaded=0&downloaded=0&left=${totalLength}&compact=1`;
-
-    const url = `${announce}?${query}`;
-    const client = url.startsWith("https:") ? httpsRequest : request;
-
-    const req = client(url, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        const response = Buffer.concat(chunks).toString("latin1");
-        let decoded: any;
-
-        try {
-          decoded = decodeBencode(response);
-          if (decoded["failure reason"]) {
-            console.error("Tracker failure:", decoded["failure reason"]);
-            return;
-          }
-        } catch {
-          console.error("Failed to decode tracker response");
-          return;
-        }
-
-        const peersRaw = decoded["peers"];
-        const peersBuffer = Buffer.from(peersRaw, "binary");
-
-        if (peersBuffer.length < 6) {
-          console.error("Invalid peer data");
-          return;
-        }
-
-        const ip = `${peersBuffer[0]}.${peersBuffer[1]}.${peersBuffer[2]}.${peersBuffer[3]}`;
-        const port = peersBuffer.readUInt16BE(4);
-        const socket = new net.Socket();
-
-        const BLOCK_LEN = 16 * 1024;
-        const numPieces = Math.ceil(totalLength / pieceLength);
-        const pieceHashes = Buffer.from(pieces, "binary");
-        const fileData: Buffer[] = new Array(numPieces);
-        let downloaded = 0;
-
-        const handshake = Buffer.alloc(68);
-        const pstr = "BitTorrent protocol";
-        handshake.writeUInt8(pstr.length, 0);
-        handshake.write(pstr, 1);
-        infoHash.copy(handshake, 28);
-        peerId.copy(handshake, 48);
-
-        socket.setTimeout(10000, () => {
-          console.error("Socket timeout");
-          socket.destroy();
-        });
-
-        socket.connect(port, ip, () => {
-          socket.write(handshake);
-        });
-
-        let stage = "handshake";
+      (function () {
+        let fileData: Buffer[] = [];
+        const BYTE_LENGTH = 16 * 1024;
+        // hold cut off buffer Handle Partial Messages
         let buffer = Buffer.alloc(0);
 
-        const pendingRequests = new Map<number, Buffer[]>();
+        const pieceHashes = getStringSubsets(decoded["info"]["pieces"]);
 
-        socket.on("data", (data: Buffer) => {
+        client.on("data", function (data) {
           buffer = Buffer.concat([buffer, data]);
+          while (buffer.length >= 5) {
+            const messageLength = buffer.readInt32BE(0); // read message length
+            const totalLength = 4 + messageLength; // total length of message
 
-          if (stage === "handshake" && buffer.length >= 68) {
-            const receivedInfoHash = buffer.subarray(28, 48);
-            if (!receivedInfoHash.equals(infoHash)) {
-              console.error("InfoHash mismatch");
-              socket.destroy();
-              return;
+            if (buffer.length < totalLength) {
+              break; // Wait for more data
             }
-            stage = "bitfield";
-            buffer = buffer.subarray(68);
-          }
+            const msgBuffer = buffer.subarray(0, totalLength);
+            buffer = buffer.subarray(totalLength);
+            const message = decodedPeerMessage(msgBuffer);
+            // unchoke
+            if (message.messageType === 1) {
+              let currentPieceIndex = 0;
+              let currentBlockIndex = 0;
 
-          while (buffer.length >= 4) {
-            const length = buffer.readUInt32BE(0);
-            if (buffer.length < 4 + length) break;
-
-            const id = buffer[4];
-            const payload = buffer.subarray(5, 4 + length);
-
-            if (id === 5 && stage === "bitfield") {
-              socket.write(Buffer.from([0, 0, 0, 1, 2]));
-              stage = "interested";
-            } else if (id === 1 && stage === "interested") {
-              stage = "unchoked";
-
-              for (let pieceIndex = 0; pieceIndex < numPieces; pieceIndex++) {
-                const pieceOffset = pieceIndex * pieceLength;
-                const lastPieceLength = Math.min(
-                  pieceLength,
-                  totalLength - pieceOffset
+              while (currentPieceIndex < pieceHashes.length) {
+                const pieceLength = Math.min(
+                  decoded.info["length"] -
+                    currentPieceIndex * decoded.info["piece length"],
+                  decoded.info["piece length"]
                 );
-                const numBlocks = Math.ceil(lastPieceLength / BLOCK_LEN);
-                const blocks: any = new Array(numBlocks).fill(undefined);
-                pendingRequests.set(pieceIndex, blocks);
 
-                for (let i = 0; i < numBlocks; i++) {
-                  const begin = i * BLOCK_LEN;
-                  const reqLen =
-                    i === numBlocks - 1 ? lastPieceLength - begin : BLOCK_LEN;
-                  const request = Buffer.alloc(17);
-                  request.writeUInt32BE(13, 0);
-                  request.writeUInt8(6, 4);
-                  request.writeUInt32BE(pieceIndex, 5);
-                  request.writeUInt32BE(begin, 9);
-                  request.writeUInt32BE(reqLen, 13);
-                  socket.write(request);
-                }
-              }
-            } else if (id === 7 && stage === "unchoked") {
-              const pieceIdx = payload.readUInt32BE(0);
-              const begin = payload.readUInt32BE(4);
-              const block = payload.subarray(8);
-              const blockIndex = Math.floor(begin / BLOCK_LEN);
-
-              const blocks = pendingRequests.get(pieceIdx);
-              if (!blocks) return;
-
-              if (blockIndex >= 0 && blockIndex < blocks.length) {
-                blocks[blockIndex] = block;
-              }
-
-              if (blocks.every((b) => b instanceof Buffer)) {
-                const piece = Buffer.concat(blocks as Buffer[]);
-                const hash = createHash("sha1").update(piece).digest("hex");
-                const expected = pieceHashes
-                  .subarray(pieceIdx * 20, (pieceIdx + 1) * 20)
-                  .toString("hex");
-
-                if (hash !== expected) {
-                  console.error(`Hash mismatch on piece ${pieceIdx}`);
+                const remainingPayload =
+                  pieceLength - currentBlockIndex * BYTE_LENGTH;
+                let payloadMessage: Buffer = Buffer.alloc(17);
+                //first part length of the message
+                payloadMessage.writeInt32BE(13, 0);
+                payloadMessage.writeInt8(6, 4);
+                payloadMessage.writeInt32BE(currentPieceIndex, 5);
+                payloadMessage.writeInt32BE(currentBlockIndex * BYTE_LENGTH, 9);
+                if (remainingPayload > BYTE_LENGTH) {
+                  // go for bytelength
+                  payloadMessage.writeInt32BE(BYTE_LENGTH, 13);
+                  currentBlockIndex++;
                 } else {
-                  fileData[pieceIdx] = piece;
-                  downloaded++;
-                  console.log(`Piece ${pieceIdx} downloaded`);
-                  if (downloaded === numPieces) {
-                    const file = Buffer.concat(fileData);
-                    writeFileSync(outputPath, file);
-                    console.log("File download complete:", outputPath);
-                    socket.destroy();
-                  }
+                  // go for the remainder of the bytes
+                  payloadMessage.writeInt32BE(
+                    Math.abs(
+                      remainingPayload === 0 ? BYTE_LENGTH : remainingPayload
+                    ),
+                    13
+                  );
+                  currentPieceIndex++;
+                  currentBlockIndex = 0;
                 }
+                client.write(payloadMessage);
+              }
+            } else if (message.messageType === 5) {
+              console.log("Received bitfield message");
+            } else if (message.messageType === 7) {
+              const returnedPieceIndex = message.payload.readInt32BE(0);
+              const returnedPieceOffset = message.payload.readInt32BE(4);
+              const currentDownloaded =
+                returnedPieceIndex * decoded.info["piece length"] +
+                returnedPieceOffset +
+                message.payload.subarray(8).length;
+              fileData[Math.ceil(currentDownloaded / BYTE_LENGTH) - 1] =
+                message.payload.subarray(8);
+              if (currentDownloaded === decoded.info["length"]) {
+                console.log("saving the file");
+                writeFileSync(outputFile, Buffer.concat(fileData));
+
+                process.exit(0);
               }
             }
-            buffer = buffer.subarray(4 + length);
           }
-        });
-        socket.on("error", (e) => {
-          console.error("Socket error:", e);
         });
       });
     });
-    req.on("error", (e) => {
-      console.error("Tracker request error:", e);
-    });
-    req.end();
-  } catch (e) {
-    console.error("Download error:", e);
+  } catch (error) {
+    console.error(error);
   }
-} else if (command === "magnet_parse") {
+}
+if (args[2] === "magnet_parse") {
   try {
     const magnet_link = args[3];
     const magnetLinkParams = new URLSearchParams(magnet_link.substring(7));
@@ -861,7 +603,7 @@ if (command === "decode") {
     console.error(error);
   }
 }
-if (command === "magnet_handshake") {
+if (args[2] === "magnet_handshake") {
   try {
     const magnet_link = args[3];
     const magnetLinkParams = new URLSearchParams(magnet_link.substring(7));
@@ -882,6 +624,25 @@ if (command === "magnet_handshake") {
       client.on("data", function (data) {
         const peerId = data.toString("hex", 48, 68);
         console.log("Peer ID:", peerId);
+
+        const reservedBit = data[25];
+        if (reservedBit === 16) {
+          console.log("There is reserved bit");
+          const msg = {
+            m: {
+              ut_metadata: 10,
+            },
+          };
+          const payload = Buffer.from(encodeObject(msg));
+          const bitMsg = Buffer.concat([
+            new Uint8Array(Buffer.from([20])),
+            new Uint8Array(Buffer.from([0])),
+            new Uint8Array(payload),
+          ]);
+          const messageLen = Buffer.alloc(4);
+          const extMsg = Buffer.concat([messageLen, bitMsg]);
+          client.write(extMsg);
+        }
         client.end();
       });
       client.on("error", function (err) {
